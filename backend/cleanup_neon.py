@@ -26,28 +26,31 @@ def run_cleanup():
             updated_p6 = cur.fetchone()
             print(f"Product #6 restored: {dict(updated_p6)}")
 
-            # Also ensure inventory for product 6 is reset if changed (seeded quantity was 11)
+            # Ensure inventory for product 6 is reset to original 11 if changed
             cur.execute("""
                 UPDATE inventory
-                SET quantity_available = 11,
-                    reserved_quantity = 0,
+                SET stock_quantity = 11,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE product_id = 6;
             """)
-            print("Product #6 inventory restored to 11 available, 0 reserved.")
+            print("Product #6 inventory restored to stock_quantity=11.")
 
             # 2. Inspect test record IDs before deletion
-            cur.execute("SELECT id, order_number, customer_id FROM orders WHERE id > 2;")
+            cur.execute("SELECT id, order_code, customer_id FROM orders WHERE id > 2;")
             test_orders = cur.fetchall()
-            print(f"\nTest orders to delete ({len(test_orders)}): {[o['order_number'] for o in test_orders]}")
+            print(f"\nTest orders to delete ({len(test_orders)}): {[o['order_code'] for o in test_orders]}")
 
-            cur.execute("SELECT id, enquiry_number, customer_id FROM enquiries WHERE id > 2;")
+            cur.execute("SELECT id, enquiry_code, customer_id FROM enquiries WHERE id > 2;")
             test_enquiries = cur.fetchall()
-            print(f"Test enquiries to delete ({len(test_enquiries)}): {[e['enquiry_number'] for e in test_enquiries]}")
+            print(f"Test enquiries to delete ({len(test_enquiries)}): {[e['enquiry_code'] for e in test_enquiries]}")
 
-            cur.execute("SELECT id, full_name, email FROM customers WHERE id > 3;")
+            cur.execute("SELECT id, name, email FROM customers WHERE id > 3;")
             test_customers = cur.fetchall()
-            print(f"Test customers to delete ({len(test_customers)}): {[c['full_name'] for c in test_customers]}")
+            print(f"Test customers to delete ({len(test_customers)}): {[c['name'] for c in test_customers]}")
+
+            cur.execute("SELECT id, product_id, reason FROM inventory_transactions WHERE id > 4;")
+            test_inv_txs = cur.fetchall()
+            print(f"Test inventory transactions to delete ({len(test_inv_txs)}): {[tx['id'] for tx in test_inv_txs]}")
 
             # 3. Delete in exact FK dependency order
             print("\n2. Executing deletions in FK dependency order:")
@@ -68,9 +71,9 @@ def run_cleanup():
             cur.execute("DELETE FROM enquiries WHERE id > 2;")
             print(" - Deleted test enquiries (id > 2)")
 
-            # Delete test inventory transactions (seeded were ids 1-6)
-            cur.execute("DELETE FROM inventory_transactions WHERE id > 6;")
-            print(" - Deleted test inventory_transactions (id > 6)")
+            # Delete test inventory transactions (seeded were ids 1-4)
+            cur.execute("DELETE FROM inventory_transactions WHERE id > 4;")
+            print(" - Deleted test inventory_transactions (id > 4)")
 
             # Delete test customers (genuine seeded customers are ids 1-3)
             cur.execute("DELETE FROM customers WHERE id > 3;")
