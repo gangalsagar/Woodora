@@ -175,6 +175,401 @@ async def admin_me(admin: Dict[str, Any] = Depends(get_current_admin)):
     return {"user": admin}
 
 # ==========================================
+# CUSTOMER AUTHENTICATION & SESSIONS
+# ==========================================
+
+class CustomerRegisterRequest(BaseModel):
+    name: str
+    email: str
+    phone: Optional[str] = None
+    password: str
+    confirm_password: Optional[str] = None
+    city: Optional[str] = None
+    address: Optional[str] = None
+
+class CustomerLoginRequest(BaseModel):
+    email: str
+    password: str
+
+class CustomerUpdateRequest(BaseModel):
+    name: Optional[str] = None
+    phone: Optional[str] = None
+    city: Optional[str] = None
+    address: Optional[str] = None
+
+def get_current_customer(authorization: Optional[str] = Header(None)) -> Dict[str, Any]:
+    if not authorization:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
+    parts = authorization.split()
+    if len(parts) != 2 or parts[0].lower() != "bearer":
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid authorization header format")
+    token = parts[1]
+
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT s.token, s.expires_at, c.id, c.name, c.email, c.phone, c.city, c.address
+        FROM customer_sessions s
+        JOIN customers c ON s.customer_id = c.id
+        WHERE s.token = ?
+    """, (token,))
+    row = cur.fetchone()
+    conn.close()
+
+    if not row:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired customer session")
+
+    expires_at = datetime.fromisoformat(row["expires_at"])
+    if datetime.now(timezone.utc) > expires_at:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Session expired. Please log in again.")
+
+    return {
+        "id": row["id"],
+        "name": row["name"],
+        "email": row["email"],
+        "phone": row["phone"],
+        "city": row["city"],
+        "address": row["address"],
+        "token": token
+    }
+
+@app.post("/api/customer/auth/register")
+async def customer_register(req: CustomerRegisterRequest):
+    name = req.name.strip()
+    email = req.email.strip().lower()
+    phone = req.phone.strip() if req.phone else None
+    password = req.password
+
+    if not name or len(name) < 2:
+        raise HTTPException(status_code=400, detail="Name must be at least 2 characters long")
+    if not email or "@" not in email:
+        raise HTTPException(status_code=400, detail="A valid email address is required")
+    if len(password) < 6:
+        raise HTTPException(status_code=400, detail="Password must be at least 6 characters long")
+    if req.confirm_password and req.confirm_password != password:
+        raise HTTPException(status_code=400, detail="Passwords do not match")
+
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT id, password_hash FROM customers WHERE email = ?", (email,))
+    existing = cur.fetchone()
+
+    hashed = hash_password(password)
+    now = utc_now()
+
+    if existing:
+        if existing.get("password_hash"):
+            conn.close()
+            raise HTTPException(status_code=400, detail="An account with this email already exists. Please log in.")
+        # Customer previously submitted an enquiry or order without password; upgrade account
+        cur.execute("""
+            UPDATE customers 
+            SET name = ?, phone = COALESCE(?, phone), password_hash = ?, 
+                city = COALESCE(?, city), address = COALESCE(?, address)
+            WHERE id = ?
+        """, (name, phone, hashed, req.city, req.address, existing["id"]))
+        customer_id = existing["id"]
+    else:
+        cur.execute("""
+            INSERT INTO customers (name, email, phone, password_hash, city, address, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (name, email, phone, hashed, req.city, req.address, now))
+        customer_id = cur.lastrowid
+
+    # Create active customer session
+    token = secrets.token_urlsafe(32)
+    session_now = datetime.now(timezone.utc)
+    expires = session_now + timedelta(days=14)
+
+    cur.execute("""
+        INSERT INTO customer_sessions (token, customer_id, created_at, expires_at)
+        VALUES (?, ?, ?, ?)
+    """, (token, customer_id, session_now.isoformat(), expires.isoformat()))
+
+    conn.commit()
+    conn.close()
+
+    return {
+        "token": token,
+        "customer": {
+            "id": customer_id,
+            "name": name,
+            "email": email,
+            "phone": phone,
+            "city": req.city,
+            "address": req.address
+        }
+    }
+
+@app.post("/api/customer/auth/login")
+async def customer_login(req: CustomerLoginRequest):
+    email = req.email.strip().lower()
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT id, name, email, phone, password_hash, city, address FROM customers WHERE email = ?", (email,))
+    cust = cur.fetchone()
+
+    if not cust or not cust.get("password_hash") or not verify_password(req.password, cust["password_hash"]):
+        conn.close()
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid email or password")
+
+    token = secrets.token_urlsafe(32)
+    now = datetime.now(timezone.utc)
+    expires = now + timedelta(days=14)
+
+    cur.execute("""
+        INSERT INTO customer_sessions (token, customer_id, created_at, expires_at)
+        VALUES (?, ?, ?, ?)
+    """, (token, cust["id"], now.isoformat(), expires.isoformat()))
+
+    conn.commit()
+    conn.close()
+
+    return {
+        "token": token,
+        "customer": {
+            "id": cust["id"],
+            "name": cust["name"],
+            "email": cust["email"],
+            "phone": cust["phone"],
+            "city": cust["city"],
+            "address": cust["address"]
+        }
+    }
+
+@app.post("/api/customer/auth/logout")
+async def customer_logout(customer: Dict[str, Any] = Depends(get_current_customer)):
+    conn = get_db()
+    conn.execute("DELETE FROM customer_sessions WHERE token = ?", (customer["token"],))
+    conn.commit()
+    conn.close()
+    return {"message": "Logged out successfully"}
+
+@app.get("/api/customer/profile")
+async def customer_profile(customer: Dict[str, Any] = Depends(get_current_customer)):
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT id, name, email, phone, city, address, created_at FROM customers WHERE id = ?", (customer["id"],))
+    c = cur.fetchone()
+    conn.close()
+    return {"customer": dict(c)}
+
+@app.put("/api/customer/profile")
+async def update_customer_profile(req: CustomerUpdateRequest, customer: Dict[str, Any] = Depends(get_current_customer)):
+    conn = get_db()
+    cur = conn.cursor()
+    updates = []
+    params = []
+    if req.name is not None:
+        updates.append("name = ?")
+        params.append(req.name.strip())
+    if req.phone is not None:
+        updates.append("phone = ?")
+        params.append(req.phone.strip())
+    if req.city is not None:
+        updates.append("city = ?")
+        params.append(req.city.strip())
+    if req.address is not None:
+        updates.append("address = ?")
+        params.append(req.address.strip())
+
+    if updates:
+        params.append(customer["id"])
+        cur.execute(f"UPDATE customers SET {', '.join(updates)} WHERE id = ?", params)
+        conn.commit()
+
+    cur.execute("SELECT id, name, email, phone, city, address FROM customers WHERE id = ?", (customer["id"],))
+    updated = cur.fetchone()
+    conn.close()
+    return {"message": "Profile updated", "customer": dict(updated)}
+
+@app.get("/api/customer/orders")
+async def get_customer_orders(customer: Dict[str, Any] = Depends(get_current_customer)):
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT * FROM orders 
+        WHERE customer_id = ? 
+        ORDER BY id DESC
+    """, (customer["id"],))
+    orders = [dict(r) for r in cur.fetchall()]
+
+    # Fetch items and history for each order
+    for o in orders:
+        cur.execute("SELECT * FROM order_items WHERE order_id = ? ORDER BY id ASC", (o["id"],))
+        o["items"] = [dict(it) for it in cur.fetchall()]
+        cur.execute("SELECT * FROM order_status_history WHERE order_id = ? ORDER BY id ASC", (o["id"],))
+        o["history"] = [dict(h) for h in cur.fetchall()]
+
+    conn.close()
+    return {"orders": orders}
+
+@app.get("/api/customer/orders/{order_id}")
+async def get_customer_order_detail(order_id: int, customer: Dict[str, Any] = Depends(get_current_customer)):
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM orders WHERE id = ? AND customer_id = ?", (order_id, customer["id"]))
+    order = cur.fetchone()
+    if not order:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Order not found or unauthorized")
+
+    cur.execute("SELECT * FROM order_items WHERE order_id = ? ORDER BY id ASC", (order_id,))
+    items = [dict(it) for it in cur.fetchall()]
+
+    cur.execute("SELECT * FROM order_status_history WHERE order_id = ? ORDER BY id ASC", (order_id,))
+    history = [dict(h) for h in cur.fetchall()]
+
+    conn.close()
+    return {
+        "order": dict(order),
+        "items": items,
+        "history": history
+    }
+
+class CustomerPlaceOrderItem(BaseModel):
+    product_id: int
+    quantity: int = 1
+
+class CustomerPlaceOrderRequest(BaseModel):
+    delivery_address: str
+    customer_phone: Optional[str] = None
+    notes: Optional[str] = None
+    items: List[CustomerPlaceOrderItem]
+
+@app.post("/api/customer/orders")
+async def customer_place_order(
+    req: CustomerPlaceOrderRequest,
+    customer: Dict[str, Any] = Depends(get_current_customer)
+):
+    if not req.items:
+        raise HTTPException(status_code=400, detail="Cart is empty. Add at least one piece to checkout.")
+    if not req.delivery_address or len(req.delivery_address.strip()) < 5:
+        raise HTTPException(status_code=400, detail="A valid delivery address is required")
+
+    conn = get_db()
+    try:
+        cur = conn.cursor()
+
+        # Update customer phone or address if provided
+        if req.customer_phone or req.delivery_address:
+            cur.execute("""
+                UPDATE customers 
+                SET phone = COALESCE(?, phone), address = COALESCE(?, address)
+                WHERE id = ?
+            """, (req.customer_phone.strip() if req.customer_phone else None, req.delivery_address.strip(), customer["id"]))
+
+        # 1. Validate all products, current verified prices, and inventory stock
+        validated_items = []
+        total_amount = 0.0
+
+        for it in req.items:
+            if it.quantity <= 0:
+                raise HTTPException(status_code=400, detail="Product quantity must be at least 1")
+            
+            cur.execute("""
+                SELECT p.id, p.name, p.wood_type, p.price, p.product_type,
+                       COALESCE(i.stock_quantity, 0) as stock_quantity,
+                       COALESCE(i.low_stock_threshold, 3) as low_stock_threshold
+                FROM products p
+                LEFT JOIN inventory i ON p.id = i.product_id
+                WHERE p.id = ?
+            """, (it.product_id,))
+            prod = cur.fetchone()
+            if not prod:
+                raise HTTPException(status_code=404, detail=f"Product #{it.product_id} no longer exists")
+
+            if prod["product_type"] == "Ready-made" and prod["stock_quantity"] < it.quantity:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Insufficient inventory for '{prod['name']}'. Requested: {it.quantity}, Available: {prod['stock_quantity']}"
+                )
+
+            line_total = prod["price"] * it.quantity
+            total_amount += line_total
+            validated_items.append({
+                "product_id": prod["id"],
+                "name": prod["name"],
+                "wood_type": prod["wood_type"],
+                "unit_price": prod["price"],
+                "quantity": it.quantity,
+                "total_price": line_total,
+                "product_type": prod["product_type"],
+                "stock_quantity": prod["stock_quantity"],
+                "low_stock_threshold": prod["low_stock_threshold"]
+            })
+
+        # 2. Generate unique order reference code
+        cur.execute("SELECT COUNT(*) as count FROM orders")
+        order_count = cur.fetchone()["count"] + 1
+        order_code = f"WOD-2026-{order_count:04d}"
+
+        now = utc_now()
+
+        # 3. Insert order
+        cur.execute("""
+            INSERT INTO orders (
+                order_code, order_type, customer_id, customer_name, customer_email, customer_phone,
+                delivery_address, total_amount, payment_status, order_status, custom_specifications,
+                production_stage, created_at, updated_at
+            ) VALUES (?, 'Ready-made', ?, ?, ?, ?, ?, ?, 'Pending', 'Pending', ?, 'Order Placed', ?, ?)
+        """, (
+            order_code, customer["id"], customer["name"], customer["email"],
+            req.customer_phone or customer["phone"], req.delivery_address.strip(),
+            total_amount, req.notes or None, now, now
+        ))
+        order_id = cur.lastrowid
+
+        # 4. Insert order items & adjust stock
+        for it in validated_items:
+            cur.execute("""
+                INSERT INTO order_items (order_id, product_id, product_name, wood_type, unit_price, quantity, total_price)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (order_id, it["product_id"], it["name"], it["wood_type"], it["unit_price"], it["quantity"], it["total_price"]))
+
+            if it["product_type"] == "Ready-made":
+                new_stock = it["stock_quantity"] - it["quantity"]
+                cur.execute("UPDATE inventory SET stock_quantity = ?, updated_at = ? WHERE product_id = ?", (new_stock, now, it["product_id"]))
+
+                # Update product status
+                new_status = "In Stock" if new_stock > it["low_stock_threshold"] else ("Low Stock" if new_stock > 0 else "Out of Stock")
+                cur.execute("UPDATE products SET availability_status = ? WHERE id = ?", (new_status, it["product_id"]))
+
+                # Record inventory transaction
+                cur.execute("""
+                    INSERT INTO inventory_transactions (
+                        product_id, change_amount, previous_quantity, new_quantity, reason, reference_id, created_at
+                    ) VALUES (?, ?, ?, ?, 'Customer Order Placement', ?, ?)
+                """, (it["product_id"], -it["quantity"], it["stock_quantity"], new_stock, order_code, now))
+
+        # 5. Insert initial status history
+        cur.execute("""
+            INSERT INTO order_status_history (order_id, status, note, created_at)
+            VALUES (?, 'Pending', ?, ?)
+        """, (order_id, f"Order placed by customer {customer['name']}. Awaiting workshop review and confirmation.", now))
+
+        conn.commit()
+    except HTTPException:
+        conn.rollback()
+        conn.close()
+        raise
+    except Exception as e:
+        conn.rollback()
+        conn.close()
+        raise HTTPException(status_code=500, detail=f"Failed to place order: {e}")
+
+    conn.close()
+
+    return {
+        "success": True,
+        "order_id": order_id,
+        "order_code": order_code,
+        "total_amount": total_amount,
+        "order_status": "Pending",
+        "message": f"Order {order_code} confirmed! Our workshop has received your order."
+    }
+
+# ==========================================
 # CUSTOMER FACING ENDPOINTS
 # ==========================================
 
@@ -1168,9 +1563,30 @@ async def admin_update_order_status(order_id: int, req: UpdateOrderStatusRequest
         conn.close()
         raise HTTPException(status_code=404, detail="Order not found")
 
+    old_status = order["order_status"]
+    new_status = req.order_status
     now = utc_now()
+
+    # Inventory restoration if an order is cancelled or rejected
+    if new_status in ["Cancelled", "Rejected"] and old_status not in ["Cancelled", "Rejected"]:
+        # Restore stock for ready-made items in this order
+        cur.execute("SELECT product_id, quantity FROM order_items WHERE order_id = ?", (order_id,))
+        items = cur.fetchall()
+        for it in items:
+            if it["product_id"]:
+                cur.execute("SELECT stock_quantity, low_stock_threshold FROM inventory WHERE product_id = ?", (it["product_id"],))
+                inv = cur.fetchone()
+                if inv:
+                    restored_stock = inv["stock_quantity"] + it["quantity"]
+                    cur.execute("UPDATE inventory SET stock_quantity = ?, updated_at = ? WHERE product_id = ?", (restored_stock, now, it["product_id"]))
+                    cur.execute("""
+                        INSERT INTO inventory_transactions (
+                            product_id, change_amount, previous_quantity, new_quantity, reason, reference_id, created_at
+                        ) VALUES (?, ?, ?, ?, 'Order Cancellation Restock', ?, ?)
+                    """, (it["product_id"], it["quantity"], inv["stock_quantity"], restored_stock, order["order_code"], now))
+
     updates = ["order_status = ?", "updated_at = ?"]
-    params = [req.order_status, now]
+    params = [new_status, now]
 
     if req.payment_status:
         updates.append("payment_status = ?")
@@ -1183,8 +1599,9 @@ async def admin_update_order_status(order_id: int, req: UpdateOrderStatusRequest
     params.append(order_id)
     cur.execute(f"UPDATE orders SET {', '.join(updates)} WHERE id = ?", params)
 
-    # Record history
-    history_note = req.note or f"Order status changed to '{req.order_status}'."
+    # Record history with responsible admin
+    admin_name = admin.get("name", "Administrator")
+    history_note = req.note or f"Order status changed to '{new_status}' by {admin_name}."
     if req.production_stage:
         history_note += f" Production Stage: {req.production_stage}."
     if req.payment_status:
@@ -1193,12 +1610,12 @@ async def admin_update_order_status(order_id: int, req: UpdateOrderStatusRequest
     cur.execute("""
         INSERT INTO order_status_history (order_id, status, note, created_at)
         VALUES (?, ?, ?, ?)
-    """, (order_id, req.order_status, history_note, now))
+    """, (order_id, new_status, history_note, now))
 
     conn.commit()
     conn.close()
 
-    return {"message": "Order status updated successfully", "order_status": req.order_status}
+    return {"message": "Order status updated successfully", "order_status": new_status}
 
 # ==========================================
 # ADMIN SETTINGS & PROFILE ENDPOINT

@@ -71,10 +71,10 @@ class DatabaseCursor:
             has_returning = "RETURNING" in clean_q.upper()
             
             # Check which table is being inserted into
-            # Tables without an 'id' column: 'inventory' (primary key is product_id), 'admin_sessions' (token)
+            # Tables without an 'id' column: 'inventory' (primary key is product_id), 'admin_sessions' (token), 'customer_sessions' (token)
             parts = clean_q.split()
             target_table = parts[2].lower().strip("()") if len(parts) > 2 else ""
-            table_has_id = target_table not in ["inventory", "admin_sessions"]
+            table_has_id = target_table not in ["inventory", "admin_sessions", "customer_sessions"]
 
             if is_insert and not has_returning and table_has_id:
                 formatted_query = query.replace("?", "%s") + " RETURNING id"
@@ -237,11 +237,20 @@ def init_db():
             name VARCHAR(255) NOT NULL,
             email VARCHAR(255) UNIQUE NOT NULL,
             phone VARCHAR(100),
+            password_hash VARCHAR(255),
             city VARCHAR(100),
             address TEXT,
             notes TEXT,
             created_at VARCHAR(100) NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS customer_sessions (
+            token VARCHAR(100) PRIMARY KEY,
+            customer_id INTEGER NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
+            created_at VARCHAR(100) NOT NULL,
+            expires_at VARCHAR(100) NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_customer_sessions_token ON customer_sessions(token);
+        CREATE INDEX IF NOT EXISTS idx_customer_sessions_customer_id ON customer_sessions(customer_id);
         CREATE TABLE IF NOT EXISTS enquiries (
             id SERIAL PRIMARY KEY,
             enquiry_code VARCHAR(100) UNIQUE NOT NULL,
@@ -359,10 +368,18 @@ def init_db():
             name TEXT NOT NULL,
             email TEXT UNIQUE NOT NULL,
             phone TEXT,
+            password_hash TEXT,
             city TEXT,
             address TEXT,
             notes TEXT,
             created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS customer_sessions (
+            token TEXT PRIMARY KEY,
+            customer_id INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            FOREIGN KEY (customer_id) REFERENCES customers(id) ON DELETE CASCADE
         );
         CREATE TABLE IF NOT EXISTS enquiries (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
