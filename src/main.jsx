@@ -989,6 +989,11 @@ function App() {
     return () => window.removeEventListener('popstate', handlePopState);
   }, []);
 
+  // Diagnostic log for routing verification
+  const normalizedPath = currentPath.replace(/\/+$/, '') || '/';
+  const isAdminRoute = normalizedPath === '/admin' || normalizedPath.startsWith('/admin/');
+  console.log(`[Woodora Router] Path: "${currentPath}" | Normalized: "${normalizedPath}" | Admin: ${isAdminRoute} | Authenticated: ${Boolean(adminToken)} | Component: ${isAdminRoute ? (adminToken ? 'AdminDashboard' : 'AdminLogin') : 'Storefront'}`);
+
   const handleLoginSuccess = (user, token) => {
     setAdminUser(user);
     setAdminToken(token);
@@ -1019,7 +1024,7 @@ function App() {
   };
 
   // Route matching:
-  if (currentPath === '/admin' || currentPath.startsWith('/admin/')) {
+  if (isAdminRoute) {
     if (!adminToken) {
       return <AdminLogin onLoginSuccess={handleLoginSuccess} />;
     }
