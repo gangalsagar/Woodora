@@ -1,0 +1,38 @@
+services:
+  # 1. FastAPI Backend Web Service
+  - type: web
+    name: woodora-backend
+    env: python
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/health
+    envVars:
+      - key: ENVIRONMENT
+        value: production
+      - key: DATABASE_URL
+        sync: false # Set via Render Dashboard using your Neon PostgreSQL connection string
+      - key: GEMINI_API_KEY
+        sync: false # Set via Render Dashboard using your Google Gemini API key
+      - key: FRONTEND_URL
+        sync: false # Set to your deployed frontend domain (e.g. https://woodora-storefront.onrender.com)
+      - key: ADMIN_NAME
+        value: Woodora Administrator
+      - key: ADMIN_EMAIL
+        sync: false
+      - key: ADMIN_PASSWORD
+        sync: false
+
+  # 2. React + Vite Frontend Static Site
+  - type: web
+    name: woodora-storefront
+    env: static
+    buildCommand: npm install && npm run build
+    staticPublishPath: dist
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html
+    envVars:
+      - key: VITE_API_BASE_URL
+        sync: false # Set to your Render Backend URL (e.g. https://woodora-backend.onrender.com)

@@ -1,0 +1,8 @@
+fastapi
+uvicorn[standard]
+python-dotenv
+google-genai
+bcrypt
+email-validator
+psycopg2-binary
+sqlalchemy
